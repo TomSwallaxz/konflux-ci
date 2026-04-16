@@ -1,0 +1,123 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: go-app-build-test
+spec:
+  description: |
+    Clone the repo, run Go unit tests, then build a container image with Buildah.
+    Tune path-context and dockerfile for your module layout (for example "." or "operator").
+  params:
+    - name: git-url
+      type: string
+    - name: revision
+      type: string
+      default: ""
+    - name: path-context
+      type: string
+      default: "."
+      description: Directory containing the Dockerfile and Go module (if not repo root)
+    - name: dockerfile
+      type: string
+      default: Dockerfile
+    - name: image
+      type: string
+      description: Local image reference for buildah (tag only; adjust if you add push steps)
+      default: localhost/go-app:latest
+  workspaces:
+    - name: source
+  tasks:
+    - name: fetch-repository
+      workspaces:
+        - name: output
+          workspace: source
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.revision)
+      taskSpec:
+        workspaces:
+          - name: output
+        params:
+          - name: url
+            type: string
+          - name: revision
+            type: string
+        steps:
+          - name: clone
+            image: docker.io/alpine/git:v2.47.2
+            workingDir: $(workspaces.output.path)
+            script: |
+              #!/usr/bin/env sh
+              set -eu
+              rm -rf ./* ./.[!.]* ./..?* 2>/dev/null || true
+              git init -b scratch .
+              git remote add origin "$(params.url)"
+              if [ -n "$(params.revision)" ]; then
+                git fetch --depth=1 origin "$(params.revision)"
+                git checkout -q FETCH_HEAD
+              else
+                git fetch --depth=1 origin HEAD
+                git checkout -q FETCH_HEAD
+              fi
+    - name: run-tests
+      runAfter:
+        - fetch-repository
+      workspaces:
+        - name: source
+          workspace: source
+      params:
+        - name: CONTEXT_SUBDIR
+          value: $(params.path-context)
+      taskSpec:
+        workspaces:
+          - name: source
+        params:
+          - name: CONTEXT_SUBDIR
+            type: string
+        steps:
+          - name: go-test
+            image: registry.access.redhat.com/ubi9/go-toolset:1.22
+            workingDir: $(workspaces.source.path)/$(params.CONTEXT_SUBDIR)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              go version
+              go test ./...
+    - name: build-image
+      runAfter:
+        - run-tests
+      workspaces:
+        - name: source
+          workspace: source
+      params:
+        - name: CONTEXT_SUBDIR
+          value: $(params.path-context)
+        - name: DOCKERFILE
+          value: $(params.dockerfile)
+        - name: IMAGE
+          value: $(params.image)
+      taskSpec:
+        workspaces:
+          - name: source
+        params:
+          - name: CONTEXT_SUBDIR
+            type: string
+          - name: DOCKERFILE
+            type: string
+          - name: IMAGE
+            type: string
+        steps:
+          - name: buildah-bud
+            image: quay.io/buildah/stable:v1.39.0
+            securityContext:
+              privileged: true
+            workingDir: $(workspaces.source.path)/$(params.CONTEXT_SUBDIR)
+            env:
+              - name: STORAGE_DRIVER
+                value: vfs
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              buildah version
+              buildah bud --layers --format docker -f "$(params.DOCKERFILE)" -t "$(params.IMAGE)" .

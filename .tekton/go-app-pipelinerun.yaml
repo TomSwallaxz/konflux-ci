@@ -1,0 +1,36 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: go-app-on-pr-or-main-push
+  annotations:
+    pipelinesascode.tekton.dev/on-cel-expression: |
+      ((event == "pull_request" && target_branch == "main") ||
+       (event == "push" && target_branch == "main")) &&
+      target_url.startsWith("https://github.com/tomswallaRH/")
+    pipelinesascode.tekton.dev/max-keep-runs: "5"
+    pipelinesascode.tekton.dev/cancel-in-progress: "true"
+spec:
+  params:
+    - name: git-url
+      value: '{{source_url}}'
+    - name: revision
+      value: '{{revision}}'
+    - name: path-context
+      value: "."
+    - name: dockerfile
+      value: Dockerfile
+    - name: image
+      value: 'localhost/go-app:{{revision}}'
+  pipelineRef:
+    name: go-app-build-test
+  workspaces:
+    - name: source
+      volumeClaimTemplate:
+        metadata:
+          creationTimestamp: null
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
